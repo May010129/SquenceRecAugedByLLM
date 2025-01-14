@@ -54,22 +54,31 @@ Your output should be in JSON format:
 
 
 class RecAugDataset(Dataset):
-    def __init__(self, input_file, system_prompt, human_prompt_template):
+    def __init__(self, input_file, exist_file, system_prompt, human_prompt_template):
         self.input_file = input_file
+        self.exist_file = exist_file
         self.system_prompt = system_prompt
         self.human_prompt_template = human_prompt_template
         with open(input_file, 'r') as file:
-            sequence_data = json.laod(file)
+            sequence_data = json.load(file)
         self.id_ls = []
         self.squence_dict = {}
         for id, content in sequence_data.items():
             self.id_ls.append(id)
             self.squence_dict[id] = content
 
-        print(f"Dataset load success! Anno Num: {len(self.id_list)}", flush=True)
+        self.exist_ls = []
+        if os.path.exists(exist_file):
+            with open(exist_file, 'r') as file:
+                for line in file:
+                    self.exist_ls.append(line['id'])
+            
+        self.id_ls = list(set(self.id_ls) - set(self.exist_ls))
+
+        print(f"Dataset load success! exist num:{len(self.exist_ls)} Anno Num: {len(self.id_ls)}", flush=True)
 
     def __len__(self):
-        return len(self.id_list)
+        return len(self.id_ls)
 
     def __getitem__(self, index):
         try:
@@ -77,7 +86,7 @@ class RecAugDataset(Dataset):
            history_list = sequence['history_list']
            potential_items = sequence['potential_items']
            conversation = [{"role":"system", "content":self.system_prompt},
-                           {"role":"user", "content":self.human_prompt_template.format(history_list=history_list, potential_items=potential_items)}]
+                           {"role":"user", "content":self.human_prompt_template.format(history_list=json.dumps(history_list, indent=2), potential_items=json.dumps(potential_items, indent=2))}]
            prompt = "\n".join([f"{msg['role']}: {msg['content']}" for msg in conversation])
         except Exception as e:
             print(f'{e}, id: {self.id_ls[index]}', flush=True)
@@ -106,15 +115,24 @@ def write_res(exist_dir, id, augmented_sequence, history_list, potential_items):
 if __name__ == "__main__":
     data_path = "/mnt/hwfile/internvideo/share_data/wuyue/data/SeqRec/toy_file_1_updated.json"
     model_path = '/mnt/hwfile/internvideo/share_data/wuyue/model/LLM_Rec_Qwen2.5_7B_full_sft/'
-    exist_dir = ' /mnt/hwfile/internvideo/share_data/wuyue/data/SeqRec/augmented_toy_file_1_updated.jsonl'
+    exist_dir = '/mnt/hwfile/internvideo/share_data/wuyue/data/SeqRec/augmented_toy_file_1_updated.jsonl'
     model = LLM(model=model_path, tensor_parallel_size=1)
-    dataset = RecAugDataset(data_path, system_prompt, human_prompt_template)
+    dataset = RecAugDataset(data_path, exist_dir, system_prompt, human_prompt_template)
     log_freq = 10
     device = torch.cuda.current_device()
-    bs = 512
+    bs = 128
     n_worker = 32
     shuffle=False
     sampler = None
+    def custom_collate_fn(batch):
+        # 将 batch 中的 id, prompt, history_list, potential_items 分别提取出来
+        ids = [item[0] for item in batch]
+        prompts = [item[1] for item in batch]
+        history_lists = [item[2] for item in batch]
+        potential_items_list = [item[3] for item in batch]
+        return ids, prompts, history_lists, potential_items_list
+
+    
     dataloader = DataLoader(
             dataset,
             batch_size=bs,
@@ -122,7 +140,7 @@ if __name__ == "__main__":
             pin_memory=False,
             sampler=sampler,
             shuffle=shuffle,
-            collate_fn=None,
+            collate_fn=custom_collate_fn,
             drop_last=False,
             persistent_workers=True if n_worker > 0 else False,
         )
